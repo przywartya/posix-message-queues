@@ -25,6 +25,14 @@
 char **neighbours;
 int neighboursSize = 0;
 
+int checkIfGivenPidInNeighbours(char* pid){
+	int i;
+	for (i = 0; i < neighboursSize; i++)
+		if(strcmp(neighbours[i], pid) == 0)
+			return 1;
+	return 0;
+}
+
 void prepend(char* s, const char* t)
 {
     size_t len = strlen(t);
@@ -72,25 +80,6 @@ void initializeQueue(mqd_t *queue, char *queueId) {
 	}
 }
 
-void intHandler(int dummy) {
-	int i;
-	for (i = 0; i < neighboursSize; i++) {
-		mqd_t queue;
-		initializeQueue(&queue, neighbours[i]);
-
-		printf("\nSending terminate singal to [%s]", neighbours[i]);
-		long pid = strtol(neighbours[i], NULL, 10);
-		if (kill(pid, SIGINT)) {
-			ERR("Error sending kill to [%s] process\n", neighbours[i]);
-		}
-
-		closeQueue(&queue, neighbours[i]);
-	}
-	printf("\nTerminating...\n");
-	exit(EXIT_SUCCESS);
-}
-
-
 void sethandler( void (*f)(int, siginfo_t*, void*), int sigNo) {
 	struct sigaction act;
 	memset(&act, 0, sizeof(struct sigaction));
@@ -111,17 +100,19 @@ int countDigits(long number) {
     return count;
 }
 
-void parseNeighbourPidFromArgs(char **neighbourPid, char **argv) {
-	if (argv[1] != NULL && strlen(argv[1]) > 0) {
-		*neighbourPid = (char*) malloc(sizeof(char) * strlen(argv[1]));
-		strcpy(*neighbourPid, argv[1]);
-	}
-}
-
 void createCurrentProcessPidString(char **myPid) {
 	long pid = (long) getpid();
 	*myPid = (char*) malloc(sizeof(char) * countDigits(pid));
 	sprintf(*myPid, "%ld", pid);
+}
+
+void printNeighbours() {
+	printf("My neighbours:\n");
+	int i;
+	for (i = 0; i < neighboursSize; i++) {
+		printf("%d. [%s]\n",i + 1, neighbours[i]);
+	}
+	printf("\n");
 }
 
 void addNeighbour(char *neighbourPid) {
@@ -136,13 +127,31 @@ void addNeighbour(char *neighbourPid) {
 	strcpy(neighbours[neighboursSize-1], neighbourPid);
 }
 
-void printNeighbours() {
-	printf("My neighbours:\n");
+void removeNeighbour(char* neighbourPid){
 	int i;
-	for (i = 0; i < neighboursSize; i++) {
-		printf("%d. [%s]\n",i + 1, neighbours[i]);
+	for (i = 0; i < neighboursSize; i++){
+		if(strcmp(neighbours[i], neighbourPid) == 0){
+			int j;
+			for(j=i;j<neighboursSize-1;j++){
+				neighbours[i] = neighbours[i+1];
+			}
+			char** tmp = realloc(neighbours, (neighboursSize - 1)*sizeof(char*));
+			if(tmp == NULL && neighboursSize > 1)
+				ERR("Realloc error");
+			neighboursSize = neighboursSize - 1;
+			neighbours = tmp;
+			printNeighbours();
+		}
 	}
-	printf("\n");
+}
+
+void parseNeighbourPidFromArgs(char **neighbourPid, char **argv) {
+	if (argv[1] != NULL && strlen(argv[1]) > 0) {
+		*neighbourPid = (char*) malloc(sizeof(char) * strlen(argv[1]));
+		strcpy(*neighbourPid, argv[1]);
+		addNeighbour(*neighbourPid);
+		printNeighbours();
+	}
 }
 
 void subscribeToMessageQueue(mqd_t *queue) {
@@ -176,9 +185,36 @@ void mq_handler(int sig, siginfo_t *info, void *p) {
 			}
 			clientPid[bytesRead] = '\0';
 			addNeighbour(clientPid);
-			printNeighbours();			
+			printNeighbours();
 		}
 	}
+}
+
+void intHandler(int sig, siginfo_t *info, void *p) {
+	int i;
+	long sPid;
+	sPid = (long)info->si_pid;
+	char* callingProcessPID;
+	callingProcessPID = (char*) malloc(sizeof(char) * countDigits(sPid));
+	sprintf(callingProcessPID, "%ld", sPid);
+	if (callingProcessPID[0] != '0')
+		removeNeighbour(callingProcessPID);
+
+	for (i = 0; i < neighboursSize; i++) {
+
+		mqd_t queue;
+		initializeQueue(&queue, neighbours[i]);
+
+		printf("\nSending terminate singal to [%s]", neighbours[i]);
+		long pid = strtol(neighbours[i], NULL, 10);
+		if (kill(pid, SIGINT)) {
+			ERR("Error sending kill to process\n");
+		}
+
+		closeQueue(&queue, neighbours[i]);
+	}
+	printf("\nTerminating...\n");
+	exit(EXIT_SUCCESS);
 }
 
 int main(int argc, char** argv) {
@@ -187,6 +223,7 @@ int main(int argc, char** argv) {
 	char *myPid;
 	
 	parseNeighbourPidFromArgs(&neighbourPid, argv);
+
 	createCurrentProcessPidString(&myPid);
 
 	printf("PID: [%s]\n\n", myPid);
@@ -194,8 +231,8 @@ int main(int argc, char** argv) {
 	mqd_t queue;
 	initializeQueue(&queue, myPid);
 
-	signal(SIGINT, intHandler);
-	sethandler(mq_handler,SIGRTMIN);
+	sethandler(intHandler, SIGINT);
+	sethandler(mq_handler, SIGRTMIN);
 	subscribeToMessageQueue(&queue);
 
 	mqd_t neighbourQueue;
@@ -208,7 +245,21 @@ int main(int argc, char** argv) {
 		}
 	}
 	
-	while(1);
+	while(1){
+		if(neighboursSize>0){
+			printf("Now you can enter a message to send to one of the neighbours above!\n");	
+			char msg[22];
+			char pid[10];
+			scanf("%21s %s", msg, pid);
+			if(strlen(msg)>20) ERR("Message too long!");
+			if(checkIfGivenPidInNeighbours(pid)){
+				printf(":%s send to %s\n", msg, pid);
+			}
+			else{
+				printf("Please enter pid from the ones listed above.\n");
+			}
+		}
+	}
 
 	if (neighbourPid != NULL) {
 		closeQueue(&neighbourQueue, neighbourPid);
