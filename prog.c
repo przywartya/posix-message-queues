@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -21,18 +22,8 @@
                      perror(source),kill(0,SIGKILL),\
 		     		     exit(EXIT_FAILURE))
 
-volatile sig_atomic_t children_left = 0;
-
 char **neighbours;
 int neighboursSize = 0;
-
-void sethandler( void (*f)(int, siginfo_t*, void*), int sigNo) {
-	struct sigaction act;
-	memset(&act, 0, sizeof(struct sigaction));
-	act.sa_sigaction = f;
-	act.sa_flags=SA_SIGINFO;
-	if (-1==sigaction(sigNo, &act, NULL)) ERR("sigaction");
-}
 
 void prepend(char* s, const char* t)
 {
@@ -45,6 +36,67 @@ void prepend(char* s, const char* t)
     {
         s[i] = t[i];
     }
+}
+
+void closeQueue(mqd_t *queue, char *queueId) {
+	if (mq_close(*queue)) {
+		ERR("Error closing queue");
+	}
+
+	char *tempName = (char*) malloc(sizeof(char) * strlen(queueId));
+	strcpy(tempName, queueId);
+	prepend(tempName, "/");
+
+	if (mq_unlink(tempName))
+		ERR("Error unlinkin queue");
+}
+
+void initializeQueue(mqd_t *queue, char *queueId) {
+	struct mq_attr attr;
+	attr.mq_maxmsg = 10;
+	attr.mq_msgsize = sizeof(pid_t) + sizeof(char) * MAX_MSG_LENGTH;
+
+	char *tempName = (char*) malloc(sizeof(char) * strlen(queueId));
+	strcpy(tempName, queueId);
+	prepend(tempName, "/");
+
+	*queue = TEMP_FAILURE_RETRY(mq_open(
+		tempName,
+		O_RDWR | O_NONBLOCK | O_CREAT,
+		0600, &attr
+		));
+
+	free(tempName);
+	if (*queue == (mqd_t)-1) {
+		ERR("Error opening queue");
+	}
+}
+
+void intHandler(int dummy) {
+	int i;
+	for (i = 0; i < neighboursSize; i++) {
+		mqd_t queue;
+		initializeQueue(&queue, neighbours[i]);
+
+		printf("\nSending terminate singal to [%s]", neighbours[i]);
+		long pid = strtol(neighbours[i], NULL, 10);
+		if (kill(pid, SIGINT)) {
+			ERR("Error sending kill to [%s] process\n", neighbours[i]);
+		}
+
+		closeQueue(&queue, neighbours[i]);
+	}
+	printf("\nTerminating...\n");
+	exit(EXIT_SUCCESS);
+}
+
+
+void sethandler( void (*f)(int, siginfo_t*, void*), int sigNo) {
+	struct sigaction act;
+	memset(&act, 0, sizeof(struct sigaction));
+	act.sa_sigaction = f;
+	act.sa_flags=SA_SIGINFO;
+	if (-1==sigaction(sigNo, &act, NULL)) ERR("sigaction");
 }
 
 int countDigits(long number) {
@@ -70,27 +122,6 @@ void createCurrentProcessPidString(char **myPid) {
 	long pid = (long) getpid();
 	*myPid = (char*) malloc(sizeof(char) * countDigits(pid));
 	sprintf(*myPid, "%ld", pid);
-}
-
-void initializeQueue(mqd_t *queue, char *queueId) {
-	struct mq_attr attr;
-	attr.mq_maxmsg = 10;
-	attr.mq_msgsize = sizeof(pid_t) + sizeof(char) * MAX_MSG_LENGTH;
-
-	char *tempName = (char*) malloc(sizeof(char) * strlen(queueId));
-	strcpy(tempName, queueId);
-	prepend(tempName, "/");
-
-	*queue = TEMP_FAILURE_RETRY(mq_open(
-		tempName,
-		O_RDWR | O_NONBLOCK | O_CREAT,
-		0600, &attr
-		));
-
-	free(tempName);
-	if (*queue == (mqd_t)-1) {
-		ERR("Error opening queue");
-	}
 }
 
 void addNeighbour(char *neighbourPid) {
@@ -150,19 +181,6 @@ void mq_handler(int sig, siginfo_t *info, void *p) {
 	}
 }
 
-void closeQueue(mqd_t *queue, char *queueId) {
-	if (mq_close(*queue)) {
-		ERR("Error closing queue");
-	}
-
-	char *tempName = (char*) malloc(sizeof(char) * strlen(queueId));
-	strcpy(tempName, queueId);
-	prepend(tempName, "/");
-
-	if (mq_unlink(tempName))
-		ERR("Error unlinkin queue");
-}
-
 int main(int argc, char** argv) {
 	
 	char *neighbourPid = NULL;
@@ -175,7 +193,8 @@ int main(int argc, char** argv) {
 
 	mqd_t queue;
 	initializeQueue(&queue, myPid);
-	
+
+	signal(SIGINT, intHandler);
 	sethandler(mq_handler,SIGRTMIN);
 	subscribeToMessageQueue(&queue);
 
